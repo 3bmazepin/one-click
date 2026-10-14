@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         右クリ出兵v2.1.1 勝利確率プレビュー
+// @name         右クリ出兵
 // @namespace    MapTroopTool
-// @description  右クリ出兵v2.1.1（殲滅戦のみ勝利確率をホバー表示）
+// @description  右クリ出兵
 // @include      https://*.3gokushi.jp/*
 // @include      http://*.3gokushi.jp/*
-// @version      2.1.1
+// @version      v2.2
 // @require      https://code.jquery.com/jquery-3.1.1.js
 // @require      https://ajax.microsoft.com/ajax/jquery.templates/beta1/jquery.tmpl.js
 // @exclude      https://*.3gokushi.jp/world/select_server_mixi_new.php*
