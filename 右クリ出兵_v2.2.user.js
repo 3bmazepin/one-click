@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         右クリ出兵
+// @name         ワンクリスマホ対応版
 // @namespace    MapTroopTool
 // @description  右クリ出兵
 // @include      https://*.3gokushi.jp/*
@@ -30,7 +30,9 @@
         scale: SERVER_NAME + '_MapTroop_scale',
         lv0: SERVER_NAME + '_MapTroop_lv0',
         autoPos: SERVER_NAME + '_MapTroop_auto_position',
-        moveType: SERVER_NAME + '_MapTroop_move_type'
+        moveType: SERVER_NAME + '_MapTroop_move_type',
+        alwaysRate: SERVER_NAME + '_MapTroop_always_rate',
+        threshold: SERVER_NAME + '_MapTroop_threshold'
     };
 
     const load = (key, def = null) =>
@@ -102,8 +104,10 @@
         // 出兵種別
         // =====================================================
         const MOVE_TYPES = {
+            // ユーザー提供の鹵獲出兵画面のhidden入力で確認（2026-10-10）。
+            307: { name: '鹵獲', confirm: '鹵獲' },
             302: {
-                name: '出兵',
+                name: '殲滅戦',
                 confirm: '出兵'
             },
             303: {
@@ -128,33 +132,32 @@
                 type = 302;
             }
 
-            return type;
+            return load(KEY.moveType) === 'loot' ? 307 : type;
         }
 
         // =====================================================
         // 実際の出兵
         // =====================================================
-        function troop(x, y, id, moveType) {
-
-            return $.ajax({
-                type: 'post',
-                url: '/facility/castle_send_troop.php',
-
-                data: {
-                    village_x_value: x,
-                    village_y_value: y,
-                    unit_assign_card_id: id,
-
-                    // 301 = 援軍
-                    // 302 = 出兵（賊討伐）
-                    // 303 = 強襲
-                    radio_move_type: moveType,
-
-                    radio_reserve_type: 0,
-                    card_id: 204,
-                    btn_send: '出兵'
-                }
-            });
+        function troop(x, y, id, moveType, skillFields = []) {
+            // Preserve actual native control names, values and repeated fields.
+            // No assumed comma-separated or indexed multi-skill encoding.
+            const fields = [
+                {name:'village_x_value',value:String(x)},
+                {name:'village_y_value',value:String(y)},
+                {name:'unit_assign_card_id',value:String(id)},
+                {name:'radio_move_type',value:String(moveType)},
+                {name:'radio_reserve_type',value:'0'},
+                {name:'card_id',value:'204'},
+                {name:'btn_send',value:'出兵'}
+            ];
+            if (moveType === 302 || moveType === 303) {
+                skillFields.forEach(field => {
+                    if (/^use_skill_id\[/.test(field.name) && field.value && field.value !== '0')
+                        fields.push({name:field.name,value:String(field.value)});
+                });
+            }
+            return $.ajax({type:'POST',url:'/facility/castle_send_troop.php',
+                data:$.param(fields),dataType:'html'});
         }
 
         // =====================================================
@@ -163,7 +166,10 @@
         function settingRow(name) {
 
             const row = $('<div>').css({
-                'line-height': '30px',
+                'line-height': '20px',
+                display: 'inline-flex',
+                'align-items': 'center',
+                gap: '3px',
                 'white-space': 'nowrap'
             });
 
@@ -171,7 +177,7 @@
                 .text(name)
                 .css({
                     display: 'inline-block',
-                    width: '75px',
+                    width: 'auto',
                     'font-weight': 'bold'
                 });
 
@@ -191,10 +197,11 @@
 
             handle.css({
                 cursor: 'move',
-                'user-select': 'none'
+                'user-select': 'none',
+                'touch-action': 'none'
             });
 
-            handle.on('mousedown', function (e) {
+            handle.on('pointerdown', function (e) {
 
                 if (e.button !== 0) return;
 
@@ -216,7 +223,7 @@
             });
 
             $(document).on(
-                'mousemove.MapTroopDrag',
+                'pointermove.MapTroopDrag',
                 function (e) {
 
                     if (!dragging) return;
@@ -249,7 +256,7 @@
             );
 
             $(document).on(
-                'mouseup.MapTroopDrag',
+                'pointerup.MapTroopDrag pointercancel.MapTroopDrag',
                 function () {
 
                     if (!dragging) return;
@@ -290,12 +297,15 @@
             $('#wrapTroopArea').remove();
             $(document).off('.MapTroopDrag');
 
+            const touchPanel = window.matchMedia('(pointer:coarse)').matches;
+            const panelScaleKey = touchPanel ? KEY.scale + '_touch' : KEY.scale;
+
             // =================================================
             // 表示倍率
             // =================================================
             let scale =
                 parseInt(
-                    load(KEY.scale, '100'),
+                    load(panelScaleKey, '100'),
                     10
                 );
 
@@ -306,6 +316,7 @@
             ) {
                 scale = 100;
             }
+            if (touchPanel) scale = Math.max(100, scale);
 
             const savedLeft = load(KEY.left);
             const savedTop = load(KEY.top);
@@ -343,7 +354,8 @@
                     border: '2px solid #555',
                     padding: '5px',
 
-                    'max-width': '900px',
+                    width: '520px',
+                    'max-width': 'calc(100vw - 20px)',
 
                     // 縦方向を拡大
                     'max-height': '90vh',
@@ -368,13 +380,76 @@
                     )
                     .css({
                         'font-weight': 'bold',
-                        'font-size': '14px',
-                        padding: '6px',
+                        'font-size': '12px',
+                        padding: '3px',
                         background: '#ddd',
                         'border-bottom':
                             '1px solid #888'
                     });
 
+            panel.append($('<style>').text(`
+                #wrapTroopArea button, #wrapTroopArea select {font-size:11px; padding:0 3px; min-height:18px; height:auto;}
+                #wrapTroopArea input[type=checkbox], #wrapTroopArea input[type=radio] {margin:0 2px; vertical-align:middle;}
+                #wrapTroopArea .attackGeneralListTbl {width:100%!important; margin:0!important; border-spacing:0; table-layout:fixed; font-size:11px;}
+                #wrapTroopArea .attackGeneralListTbl tr {height:auto!important;}
+                #wrapTroopArea .attackGeneralListTbl td {padding:2px 3px!important; height:auto!important; line-height:1.15!important;}
+                #wrapTroopArea .attackGeneralListTbl td:first-child {width:140px!important; max-width:140px; text-align:center!important;}
+                #wrapTroopArea .attackGeneralListTbl td img {width:36px!important; height:auto!important; max-width:36px!important; vertical-align:middle;}
+                #wrapTroopArea .attackGeneralListTbl td p {margin:0!important;}
+                #wrapTroopArea .attackGeneralListTbl td br {line-height:1;}
+                #wrapTroopArea .MapTroopStatus {text-align:left!important; white-space:nowrap; font-size:11px; font-variant-numeric:tabular-nums;}
+                #wrapTroopArea .MapTroopStatus div {margin:0!important; padding:0!important; line-height:1.3!important;}
+                #wrapTroopArea .MapTroopPortrait {width:90px!important; white-space:nowrap; font-size:10px; text-align:left!important;}
+                #wrapTroopArea .MapTroopSkills {text-align:left; font-size:11px; line-height:1.2; margin-top:2px;}
+                #wrapTroopArea .MapTroopSkills label {display:inline-block; margin-right:3px;}
+                #wrapTroopArea .attackGeneralListTbl td {vertical-align:top!important;}
+                #wrapTroopArea .MapTroopActionHead {display:grid;grid-template-columns:48px 1fr;align-items:center;gap:3px;min-height:20px;text-align:left;}
+                #wrapTroopArea .MapTroopActionHead > button {width:48px;box-sizing:border-box;margin:0!important;}
+                #wrapTroopArea .MapTroopRate {font-size:10px;white-space:nowrap;line-height:1.2;text-align:left;}
+                #wrapTroopArea .MapTroopSkillSlot {min-height:20px;margin-top:2px;}
+                #wrapTroopArea .MapTroopSkillSlot .MapTroopSkills {display:flex;flex-wrap:wrap;gap:2px;justify-content:flex-start;margin:0;}
+                #wrapTroopArea .MapTroopSkillSlot button {margin:0!important;}
+                #wrapTroopArea .MapTroopPortrait > div {min-height:40px;}
+                #wrapTroopArea td.MapTroopActionCell {vertical-align:top!important;text-align:left!important;}
+                #wrapTroopArea .MapTroopActionHead {display:flex!important;justify-content:center;min-height:20px;}
+                #wrapTroopArea .MapTroopRateSlot {display:block!important;min-height:14px;line-height:14px;text-align:center!important;margin:2px 0;overflow:hidden;}
+                #wrapTroopArea .MapTroopRateSlot .MapTroopRate {font-size:11px;line-height:14px;white-space:nowrap;}
+                #wrapTroopArea .MapTroopSkillSlot {display:block!important;margin:2px 0 0!important;}
+                /* Keep native game styles from narrowing status items into vertical text. */
+                #wrapTroopArea .attackGeneralListTbl {min-width:440px!important;}
+                #wrapTroopArea td.MapTroopStatus {width:auto!important;min-width:200px!important;max-width:none!important;writing-mode:horizontal-tb!important;}
+                #wrapTroopArea td.MapTroopStatus > div {width:100%!important;max-width:none!important;min-width:0!important;height:auto!important;float:none!important;position:static!important;box-sizing:border-box!important;writing-mode:horizontal-tb!important;}
+                #wrapTroopArea td.MapTroopStatus > div > span {display:block!important;width:auto!important;min-width:max-content!important;max-width:none!important;height:auto!important;float:none!important;position:static!important;margin:0!important;padding:0!important;white-space:nowrap!important;word-break:normal!important;overflow-wrap:normal!important;writing-mode:horizontal-tb!important;text-align:left!important;line-height:1.3!important;}
+                #wrapTroopArea {overflow-x:auto!important;}
+                @media (max-width:600px), (pointer:coarse) {
+                    #wrapTroopArea {width:calc(100vw - 16px)!important; max-width:calc(100vw - 16px)!important; box-sizing:border-box; padding:2px!important;}
+                    #wrapTroopArea .attackGeneralListTbl td:first-child {width:90px!important;max-width:90px!important;}
+                    #wrapTroopArea .attackGeneralListTbl col:nth-child(1) {width:90px!important;}
+                    #wrapTroopArea .attackGeneralListTbl col:nth-child(2) {width:64px!important;}
+                    #wrapTroopArea .MapTroopPortrait {width:64px!important;}
+                    #wrapTroopArea .MapTroopPortrait > div {flex-direction:column;gap:0!important;}
+                    #wrapTroopArea .attackGeneralListTbl {min-width:390px!important;}
+                    #wrapTroopArea .MapTroopStatus > div {display:flex!important;flex-wrap:wrap;gap:0 6px;white-space:normal;}
+                    #wrapTroopArea .MapTroopActionHead {grid-template-columns:1fr;gap:4px;text-align:center;}
+                    #wrapTroopArea .MapTroopActionHead > button {width:100%;}
+                    #wrapTroopArea .MapTroopRateSlot {min-height:20px;line-height:20px;}
+                    #wrapTroopArea .MapTroopRateSlot .MapTroopRate {font-size:13px;line-height:20px;text-align:center;}
+                    #wrapTroopArea .MapTroopSkillSlot {min-height:0;margin-top:6px;}
+                    #wrapTroopArea .MapTroopSkillSlot .MapTroopSkills {flex-direction:column;gap:6px;}
+                    #wrapTroopArea {font-size:14px!important;}
+                    #wrapTroopArea button, #wrapTroopArea select {font-size:16px!important;min-height:44px!important;min-width:44px;padding:6px 8px!important;touch-action:manipulation;}
+                    #wrapTroopArea .attackGeneralListTbl td {padding:5px 4px!important;}
+                    #wrapTroopArea .attackGeneralListTbl td:first-child {width:110px!important;max-width:110px!important;}
+                    #wrapTroopArea .attackGeneralListTbl col:nth-child(1) {width:110px!important;}
+                    #wrapTroopArea .MapTroopSkills {display:flex;flex-direction:column;gap:6px;margin-top:6px;font-size:14px;}
+                    #wrapTroopArea .MapTroopSkills button {width:100%;margin:0!important;white-space:normal;line-height:1.3;}
+                    #wrapTroopArea .MapTroopStatus {font-size:14px!important;}
+                    #wrapTroopArea .MapTroopPortrait {font-size:12px!important;}
+                    #wrapTroopArea input[type=checkbox] {width:22px;height:22px;margin:0 4px!important;}
+                    #wrapTroopArea .attackGeneralListTbl td:first-child > button {width:100%;}
+                    #wrapTroopArea .attackGeneralListTbl td:first-child > span {display:block;margin:4px 0!important;font-size:14px;}
+                }
+            `));
             panel.append(title);
 
             enableDrag(panel, title);
@@ -384,7 +459,10 @@
             // =================================================
             const settings =
                 $('<div>').css({
-                    padding: '5px',
+                    padding: '2px',
+                    display: 'flex',
+                    'flex-wrap': 'wrap',
+                    gap: '2px 10px',
                     background: '#f5f5f5',
                     'border-bottom':
                         '1px solid #aaa'
@@ -394,7 +472,7 @@
             // 1. 表示位置
             // =================================================
             const positionRow =
-                settingRow('表示位置');
+                settingRow('位置');
 
             const positionMode =
                 $('<select>')
@@ -428,8 +506,8 @@
             // 現在位置保存
             // -------------------------------------------------
             const savePosition =
-                $('<button>')
-                    .text('現在位置を保存')
+                $('<button type="button">')
+                    .text('位置保存')
                     .css('margin-left', '5px')
                     .on('click', function () {
 
@@ -454,7 +532,7 @@
                         setTimeout(
                             () =>
                                 button.text(
-                                    '現在位置を保存'
+                                    '位置保存'
                                 ),
                             700
                         );
@@ -464,7 +542,7 @@
             // 位置リセット
             // -------------------------------------------------
             const resetPosition =
-                $('<button>')
+                $('<button type="button">')
                     .text('リセット')
                     .css('margin-left', '5px')
                     .on('click', function () {
@@ -497,13 +575,13 @@
             // 2. 表示サイズ
             // =================================================
             const sizeRow =
-                settingRow('表示サイズ');
+                settingRow('倍率');
 
             const minus =
-                $('<button>').text('－');
+                $('<button type="button">').text('－');
 
             const plus =
-                $('<button>').text('＋');
+                $('<button type="button">').text('＋');
 
             const scaleText =
                 $('<span>').css({
@@ -514,7 +592,7 @@
                 });
 
             const resetScale =
-                $('<button>')
+                $('<button type="button">')
                     .text('リセット')
                     .css('margin-left', '5px');
 
@@ -530,7 +608,7 @@
                 );
 
                 save(
-                    KEY.scale,
+                    panelScaleKey,
                     scale
                 );
             }
@@ -541,7 +619,7 @@
 
                     scale =
                         Math.max(
-                            70,
+                            touchPanel ? 100 : 70,
                             scale - 10
                         );
 
@@ -645,6 +723,7 @@
                             .text('援軍')
                     );
 
+            moveSelect.append($('<option>').val('307').text('鹵獲'));
             moveSelect.val(
                 String(getMoveType())
             );
@@ -748,7 +827,7 @@
                 const title = doc.title || '';
                 const hasRateLabel = /勝\s*利\s*確\s*率/.test(visible + raw);
                 const hasSendButton = !!doc.querySelector('input[name="btn_send"], button[name="btn_send"]');
-                console.info('[右クリ出兵v2.1.1] 確率解析結果', {
+                console.info('[右クリ出兵v2.2] 確率解析結果', {
                     title, hasRateLabel, hasSendButton,
                     htmlLength: html.length,
                     imageCount: doc.images.length
@@ -756,78 +835,156 @@
                 return null;
             }
 
-            function attachWinRateHover(table, cardId) {
-                const img = table.find('img').filter(function () {
-                    return $(this).closest('td').length > 0;
-                }).first();
-                if (!img.length) return;
-                img.css('cursor', 'help');
-                let tip = null;
-                let timer = null;
-                let currentToken = 0;
-                img.on('mouseenter', function () {
-                    if (moveSelect.val() !== '302') return;
-                    currentToken = ++hoverToken;
-                    const token = currentToken;
-                    tip = $('<div>').css({
-                        position: 'fixed', 'z-index': 111111115,
-                        padding: '7px 12px', background: '#222', color: '#fff',
-                        border: '1px solid #d9b44a', 'border-radius': '5px',
-                        'font-size': '14px', 'font-weight': 'bold',
-                        'pointer-events': 'none', 'white-space': 'nowrap'
-                    }).text('勝利確率：取得中…').appendTo('body');
-                    const r = this.getBoundingClientRect();
-                    tip.css({left: Math.min(r.right + 8, window.innerWidth - 190) + 'px',
-                        top: Math.max(0, r.top) + 'px'});
-                    const key = [x, y, cardId].join(':');
-                    if (previewCache.has(key)) {
-                        tip.text(previewCache.get(key));
-                        return;
+            const skillStates = new Map();
+            const submittedCards = new Set();
+            const rateRow = settingRow('勝率');
+            const alwaysRate = $('<input type="checkbox">').prop('checked', load(KEY.alwaysRate, '1') === '1');
+            const threshold = $('<select>').append($('<option>').val('off').text('赤色化なし'));
+            [50,60,70,80,90,100].forEach(n => threshold.append($('<option>').val(n).text(n + '%以下で赤')));
+            threshold.val(load(KEY.threshold, '80'));
+            rateRow.append($('<label>').append(alwaysRate, ' 常時表示'), threshold);
+            settings.append(rateRow);
+            alwaysRate.on('change', () => { save(KEY.alwaysRate, alwaysRate.prop('checked') ? '1' : '0'); drawCards(); });
+            threshold.on('change', () => { save(KEY.threshold, threshold.val()); drawCards(); });
+            function nativeSkills(original, id) {
+                if (skillStates.has(id)) return skillStates.get(id);
+                // Only controls actually present in the supplied official form are used.
+                const controls = original.find(':input[name]').filter(function () {
+                    if (!/^use_skill_id\[/.test(this.name) || !['select-one','checkbox','radio'].includes(this.type) || this.disabled) return false;
+                    const cell = $(this).closest('td');
+                    // Show only skills the official form explicitly marks usable.
+                    if (!/使用可能/.test(cell.text()) || /使用不可|使用不能/.test(cell.text())) return false;
+                    if (this.tagName !== 'SELECT' && (!this.value || this.value === '0')) return false;
+                    return true;
+                }).map(function () {
+                    const control = $(this).clone();
+                    if (this.tagName === 'SELECT') {
+                        control.find('option').filter(function () { return !this.value || this.value === '0' || this.disabled || /スキルなし|スキル無し|使用不可|使用不能/.test(this.textContent); }).remove();
+                        if (!control.find('option').length) return null;
                     }
-                    timer = setTimeout(function () {
-                        const fields = getPreviewFields(cardId);
-                        if (!fields) {
-                            if (token === hoverToken && tip) tip.text('勝利確率：フォーム取得不可');
-                            return;
-                        }
-                        if (activePreview) activePreview.abort();
-                        activePreview = $.ajax({
-                            url: '/facility/castle_send_troop.php', type: 'POST',
-                            data: $.param(fields), dataType: 'html'
-                        }).done(function (html) {
-                            const rate = extractWinRate(html);
-                            const result = rate ? '勝利確率：' + rate : '勝利確率：解析不可（F12 Console確認）';
-                            if (rate) previewCache.set(key, result);
-                            if (token === hoverToken && tip) tip.text(result);
-                        }).fail(function (_xhr, status) {
-                            if (status !== 'abort' && token === hoverToken && tip)
-                                tip.text('勝利確率：通信エラー');
-                        }).always(function () { activePreview = null; });
-                    }, 250);
-                }).on('mouseleave', function () {
-                    ++hoverToken;
-                    clearTimeout(timer);
-                    if (tip) tip.remove();
-                    tip = null;
-                    if (activePreview) activePreview.abort();
+                    const cell = $(this).closest('td');
+                    const text = cell.find('a').first().text().trim();
+                    control.attr('data-skill-label', text || this.getAttribute('aria-label') || this.title || (this.value === '0' ? 'スキルなし' : this.value));
+                    control.removeAttr('id');
+                    return control[0];
                 });
+                controls.each(function () { $(this).prop('checked', false); if (this.tagName === 'SELECT') $(this).val('0'); });
+                skillStates.set(id, controls);
+                return controls;
+            }
+            function toggleNativeSkill(controls, target, value) {
+                if (target.tagName === 'SELECT') {
+                    if (target.value === value) target.selectedIndex = -1;
+                    else target.value = value;
+                    return;
+                }
+                const wasChecked = target.checked;
+                if (target.type === 'radio') {
+                    Array.from(controls).forEach(control => {
+                        if (control.type === 'radio' && control.name === target.name) control.checked = false;
+                    });
+                }
+                target.checked = !wasChecked;
+            }
+            function attachWinRateHover(table, cardId, button, controls) {
+                const img = table.find('img').first();
+                const rateText = $('<span class="MapTroopRate">').appendTo(table.find('.MapTroopRateSlot').first());
+                let tip = null, token = 0;
+                function update(force) {
+                    const version = ++token;
+                    button.css({background:'',color:''});
+                    rateText.toggle(alwaysRate.prop('checked') && moveSelect.val() === '302');
+                    if (moveSelect.val() !== '302' || !table.closest('body').length) return;
+                    const selected = controls.serializeArray();
+                    const key = JSON.stringify([x,y,cardId,selected]);
+                    function show(rate, message) {
+                        if (version !== token || !table.closest('body').length) return;
+                        const text = rate ? '勝率：' + rate : message;
+                        rateText.text(text); if (tip) tip.text(text);
+                        if (rate && threshold.val() !== 'off' && parseFloat(rate) <= Number(threshold.val()))
+                            button.css({background:'#c62828',color:'#fff'});
+                    }
+                    if (!force && previewCache.has(key)) { show(previewCache.get(key)); return; }
+                    show(null, '勝率：取得中…');
+                    const fields = getPreviewFields(cardId);
+                    if (!fields) { show(null, '勝率：フォーム取得不可'); return; }
+                    const names = new Set(controls.map(function () {return this.name;}).get());
+                    const payload = fields.filter(f => !names.has(f.name));
+                    // Actual official control names/values; no invented multi-skill format.
+                    // Unselected groups retain the base version's no-skill value.
+                    names.forEach(name => { if (!selected.some(f => f.name === name)) payload.push({name, value:'0'}); });
+                    payload.push(...selected);
+                    const request = $.ajax({url:'/facility/castle_send_troop.php',type:'POST',data:$.param(payload),dataType:'html'});
+                    request.done(html => { const rate = extractWinRate(html); if (rate && version === token) previewCache.set(key,rate); show(rate,'勝率：解析不可'); })
+                        .fail(() => show(null,'勝率：通信エラー'));
+                }
+                img.css('cursor','help').on('mouseenter', function () {
+                    if (moveSelect.val() !== '302') return;
+                    tip = $('<div class="MapTroopRateTip">').css({position:'fixed','z-index':111111115,background:'#222',color:'#fff',padding:'6px', 'pointer-events':'none'}).appendTo('body');
+                    const r=this.getBoundingClientRect(); tip.css({left:Math.max(0,Math.min(r.right+5,innerWidth-200)),top:Math.max(0,r.top)});
+                    update(false);
+                }).on('mouseleave', () => { if(tip) tip.remove(); tip=null; });
+                controls.off('change').on('change', () => update(true));
+                if(alwaysRate.prop('checked') || threshold.val() !== 'off') setTimeout(() => { if(table.closest('body').length) update(false); }, 0);
             }
 
             // =================================================
             // 武将一覧描画
             // =================================================
+            function compactStatusLines(text) {
+                const normalized = text.replace(/\s+/g, ' ').trim();
+                function value(label) {
+                    const match = normalized.match(new RegExp(label + '\\s*([0-9][0-9,]*(?:\\.[0-9]+)?)'));
+                    return match ? match[1] : null;
+                }
+                const attack = value('攻撃'), speed = value('速度');
+                if (attack === null || speed === null) return null;
+                const troop = normalized.match(/兵科\s*(.*?)(?=\s*(?:HP|討|計|攻撃)|$)/);
+                const hp = value('HP'), total = value('(?:討伐(?:ゲージ)?|討|計)');
+                return [
+                    [troop ? '兵科 ' + troop[1] : '', hp !== null ? 'HP ' + hp : '', total !== null ? '討伐 ' + total : ''].filter(Boolean).join('　'),
+                    '攻撃 ' + attack + '　速度 ' + speed
+                ];
+            }
+            function compactStatusCells(table) {
+                table.find('td').each(function () {
+                    const cell = $(this);
+                    if (cell.find('img, :input').length) return;
+                    const walker = document.createTreeWalker(cell[0], NodeFilter.SHOW_TEXT);
+                    const parts = [];
+                    while (walker.nextNode()) parts.push(walker.currentNode.textContent);
+                    const lines = compactStatusLines(parts.join(' '));
+                    if (!lines) return;
+                    cell.empty().addClass('MapTroopStatus');
+                    cell[0].style.removeProperty('width');
+                    cell[0].style.removeProperty('min-width');
+                    cell[0].style.removeProperty('max-width');
+                    lines.forEach(line => {
+                        const row = $('<div>').css({display:'grid', 'grid-template-columns':line.startsWith('攻撃') ? '125px 1fr' : '70px 60px 1fr'});
+                        line.split('　').forEach(part => row.append($('<span>').text(part)));
+                        cell.append(row);
+                    });
+                });
+                table.find('img').each(function () {
+                    const cell = $(this).closest('td');
+                    const img = $(this).detach();
+                    const level = cell.text().match(/Lv\s*(\d+)/);
+                    cell.empty().addClass('MapTroopPortrait')
+                        .append($('<div>').css({display:'flex','align-items':'center',gap:'4px'})
+                            .append(img, $('<span>').text(level ? 'Lv' + level[1] : '').css({color:'#298fb9'})));
+                });
+            }
+
             function drawCards() {
 
+                $('.MapTroopRateTip').remove();
+                skillStates.forEach(controls => controls.detach());
                 cardArea.empty();
 
                 const hideLv0 =
                     lvSelect.val() === 'hide';
 
-                const moveType =
-                    parseInt(
-                        moveSelect.val(),
-                        10
-                    );
+                const moveType = moveSelect.val();
 
                 const buttonName =
                     MOVE_TYPES[moveType].name;
@@ -840,15 +997,12 @@
                     // =========================================
                     // Lv0判定
                     // =========================================
-                    if (
-                        hideLv0 &&
-                        table.html()
-                            .indexOf(
-                                '<strong>Lv</strong>0'
-                            ) > -1
-                    ) {
-                        return;
-                    }
+                    // Match the first level in the main commander's row only.
+                    const mainRadio = table.find('input[name="unit_assign_card_id"]').first();
+                    const mainRow = mainRadio.closest('tr');
+                    const firstLv = mainRow.find('strong').filter(function () { return $(this).text().trim() === 'Lv'; }).first();
+                    const lvMatch = firstLv.length ? (firstLv[0].nextSibling?.textContent || '').match(/^\s*(\d+)/) : null;
+                    if (hideLv0 && lvMatch && Number(lvMatch[1]) === 0) return;
 
                     table.css({
                         margin: 0
@@ -877,6 +1031,10 @@
                     const id =
                         radio.val();
 
+                    if (submittedCards.has(String(id))) return;
+                    const skills = nativeSkills($(this), id);
+                    const canSkill = moveType === '302' || moveType === '303';
+                    skills.prop('disabled', !canSkill);
                     // =========================================
                     // デッキ画面で非表示指定
                     // =========================================
@@ -908,11 +1066,19 @@
                         .find('input')
                         .remove();
 
+                    compactStatusCells(table);
+                    table.find('td').removeAttr('rowspan colspan width align');
+                    table.find('td').first().css('width','140px');
+                    table.children('colgroup').remove();
+                    if (table.find('td.MapTroopStatus').length && table.find('td.MapTroopPortrait').length) {
+                        table.prepend($('<colgroup>').append($('<col>').css('width','140px'), $('<col>').css('width','90px'), $('<col>')));
+                    }
+
                     // =========================================
                     // 出兵 / 強襲 / 援軍ボタン
                     // =========================================
                     const troopButton =
-                        $('<button>')
+                        $('<button type="button">')
                             .text(
                                 buttonName
                             )
@@ -922,8 +1088,12 @@
                             })
                             .on(
                                 'click',
-                                function () {
+                                function (e) {
 
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    if (submittedCards.has(String(id)) || $(this).prop('disabled')) return;
+                                    const selectedSkillFields = canSkill ? skills.serializeArray() : [];
                                     const currentType =
                                         parseInt(
                                             moveSelect.val(),
@@ -952,7 +1122,8 @@
                                         x,
                                         y,
                                         id,
-                                        currentType
+                                        currentType,
+                                        selectedSkillFields
                                     )
                                     .done(
                                         function () {
@@ -972,13 +1143,13 @@
                                                     '#00FF00'
                                                 );
 
-                                            $('#wrapTroopArea')
-                                                .remove();
-
-                                            $(document)
-                                                .off(
-                                                    '.MapTroopDrag'
-                                                );
+                                            submittedCards.add(String(id));
+                                            button.prop('disabled', true).text('送信済');
+                                            skills.prop('disabled', true);
+                                            table.find('.MapTroopSkills button').prop('disabled', true);
+                                            table.css('opacity', '0.55');
+                                            $('.MapTroopRateTip').remove();
+                                            // Keep the panel and drag handlers for the next commander.
                                         }
                                     )
                                     .fail(
@@ -1002,14 +1173,45 @@
                                 }
                             );
 
-                    table
-                        .find('td')
-                        .eq(0)
-                        .append(
-                            troopButton
-                        );
+                    const actionCell = table.find('td').first().addClass('MapTroopActionCell');
+                    const actionHead = $('<div class="MapTroopActionHead">').append(troopButton);
+                    actionCell.append(actionHead, $('<div class="MapTroopRateSlot">'));
+                    const skillSlot = $('<div class="MapTroopSkillSlot">').appendTo(actionCell);
 
-                    attachWinRateHover(table, id);
+                    if (canSkill && skills.length) {
+                        const skillBox = $('<div class="MapTroopSkills">')
+                            .attr('title', 'クリックで選択、再クリックで解除。選択したスキルを出兵時に使用');
+                        const skillButtons = [];
+                        skills.prop('disabled', false).hide().appendTo(skillBox);
+                        function refreshSkillButtons() {
+                            skillButtons.forEach(({button, control, value}) => {
+                                const selected = control.tagName === 'SELECT' ? control.value === value : control.checked;
+                                button.attr('aria-pressed', selected ? 'true' : 'false')
+                                    .css({background:selected ? '#d9ecff' : '', color:selected ? '#06477c' : '',
+                                        'border-color':selected ? '#2879bb' : '', 'font-weight':selected ? 'bold' : 'normal'});
+                            });
+                        }
+                        function addSkillButton(control, value, label) {
+                            const button = $('<button type="button">').text(label)
+                                .attr('title', 'クリックで選択／解除').css({'margin-right':'3px'})
+                                .on('click', function () {
+                                    toggleNativeSkill(skills, control, value);
+                                    refreshSkillButtons();
+                                    $(control).trigger('change');
+                                });
+                            skillButtons.push({button, control, value});
+                            skillBox.append(button);
+                        }
+                        skills.each(function () {
+                            const control = this;
+                            if (control.tagName === 'SELECT') {
+                                Array.from(control.options).forEach(option => addSkillButton(control, option.value, option.textContent.trim()));
+                            } else addSkillButton(control, control.value, control.getAttribute('data-skill-label'));
+                        });
+                        refreshSkillButtons();
+                        skillSlot.append(skillBox);
+                    }
+                    attachWinRateHover(table, id, troopButton, skills);
 
                     cardArea.append(
                         table
@@ -1075,14 +1277,14 @@
                 $("<table class='general attackGeneralListTbl'>");
 
             const closeButton =
-                $('<button>')
+                $('<button type="button">')
                     .text('閉じる')
                     .on(
                         'click',
                         function () {
 
-                            $('#wrapTroopArea')
-                                .remove();
+                            $('.MapTroopRateTip').remove();
+                            $('#wrapTroopArea').remove();
 
                             $(document)
                                 .off(
@@ -1189,6 +1391,34 @@
             'click contextmenu',
             contextFunction
         );
+
+        // Explicit tap mode replaces long press, avoiding native touch gestures.
+        const tapKey = SERVER_NAME + '_MapTroop_tap_mode';
+        const touchDevice = navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches;
+        let tapMode = load(tapKey, touchDevice ? '1' : '0') === '1';
+        const tapToggle = $('<button type="button" id="MapTroopTapToggle">').css({
+            position:'fixed',right:'8px',bottom:'8px','z-index':111111110,
+            padding:'8px 12px','font-size':'13px','min-height':'40px',
+            border:'1px solid #555','border-radius':'5px','touch-action':'manipulation'
+        }).appendTo('body');
+        function showTapMode() {
+            tapToggle.text('タップ出兵 ' + (tapMode ? 'ON' : 'OFF'))
+                .attr('aria-pressed', tapMode ? 'true' : 'false')
+                .css({background:tapMode ? '#d9ecff' : '#fff',color:'#111'});
+        }
+        tapToggle.on('click', function (event) {
+            event.preventDefault(); event.stopPropagation();
+            tapMode = !tapMode; save(tapKey, tapMode ? '1' : '0'); showTapMode();
+        });
+        showTapMode();
+        $('<style>').text('.tile, .tile * {touch-action:manipulation;}').appendTo('head');
+        document.addEventListener('click', function (event) {
+            if (!tapMode || event.target.closest('#wrapTroopArea, #MapTroopTapToggle')) return;
+            const tile = event.target.closest('.tile');
+            if (!tile || tile.dataset.x === undefined || tile.dataset.y === undefined) return;
+            event.preventDefault(); event.stopImmediatePropagation();
+            contextFunction({which:3,currentTarget:tile,preventDefault:function(){}});
+        }, true);
 
         // =====================================================
         // マップサイズ変更
