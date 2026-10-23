@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         ワンクリスマホ対応版2.2.12 軽量版
+// @name         ワンクリスマホ対応版2.2.13 軽量版
 // @namespace    MapTroopTool
 // @description  右クリ・タップ出兵／勝率・速度順・行軍帰還カウントダウン（診断機能なし）
 // @include      https://*.3gokushi.jp/*
 // @include      http://*.3gokushi.jp/*
-// @version      2.2.12
+// @version      2.2.13
 // @require      https://code.jquery.com/jquery-3.1.1.js
 // @require      https://ajax.microsoft.com/ajax/jquery.templates/beta1/jquery.tmpl.js
 // @exclude      https://*.3gokushi.jp/world/select_server_mixi_new.php*
@@ -345,7 +345,7 @@ commanderNameRead=(async()=>{
 const queue=['/card/deck.php'],visited=new Set();
 while(queue.length && visited.size<4 && needsName()){
 const path=queue.shift();if(visited.has(path))continue;visited.add(path);
-const html=await $.ajax({url:path,type:'GET',dataType:'html',timeout:15000});
+const html=await $.ajax({url:path,type:'GET',cache:false,dataType:'html',timeout:15000});
 const root=$('<div>').append($.parseHTML(html,document,false));collectCommanderNames(root);applyCommanderNames();
 root.find('a[href]').each(function(){
 const raw=this.getAttribute('href')||'',next=safeDeckPageHref(raw,location.origin+path);
@@ -383,7 +383,11 @@ const retryDelays=[2000,5000,10000,30000];
 function persist(){adapter.save(mapTroopList(jobs.values()));}
 function changed(){persist();adapter.change();}
 function due(job){return Number.isFinite(job.nextCheck) && job.nextCheck<=adapter.now();}
-function postpone(job){job.attempts=(job.attempts||0)+1;job.nextCheck=job.attempts<=retryDelays.length ? adapter.now()+retryDelays[job.attempts-1] : null;}
+function postpone(job){
+job.attempts=(job.attempts||0)+1;
+const delay=job.attempts<=retryDelays.length ? retryDelays[job.attempts-1] : job.state==='awaitReady' ? 30000 : 60000;
+job.nextCheck=adapter.now()+delay;
+}
 function add(info){
 const seconds=Number.isFinite(info.seconds) ? Math.max(0,info.seconds) : null;
 const job={id:String(info.id),nameHints:info.nameHints||[],state:seconds===null?'awaitReturn':'marching',deadline:seconds===null?null:info.sentAt+seconds*1000,nextCheck:seconds===null?null:0,attempts:0};
@@ -392,6 +396,7 @@ jobs.set(job.id,job);changed();return job;
 function restore(items){for(const job of items||[])if(job && /^\d+$/.test(String(job.id)) && ['marching','awaitReturn','returning','awaitReady'].includes(job.state)){
 job.id=String(job.id);delete job.issue;job.nameHints=mapTroopList(new Set(mapTroopReadArray(job.nameHints).filter(x=>typeof x==='string').map(normalizedCommanderName)));
 if(['marching','returning'].includes(job.state) && !Number.isFinite(job.deadline))continue;
+if(job.nextCheck===null && (job.state==='awaitReady' || (job.state==='awaitReturn' && Number.isFinite(job.deadline)))){job.nextCheck=adapter.now();job.attempts=0;}
 jobs.set(job.id,job);
 }}
 function chooseReturn(job,units){
@@ -450,24 +455,35 @@ const cardTemplates=new Map(),pendingSends=new Set();
 let trackerContext=null,rosterRead=null,returnRead=null;
 function durationSeconds(text){const m=String(text||'').match(/^([0-9]+):([0-5][0-9]):([0-5][0-9])$/);return m?Number(m[1])*3600+Number(m[2])*60+Number(m[3]):null;}
 function documentFrom(html){return new DOMParser().parseFromString(html,'text/html');}
+function officialUnitSelectable(input){
+const table=input.closest('.attackGeneralListTbl');
+if(!table || input.type!=='radio' || !/^\d+$/.test(input.value) || input.matches(':disabled'))return false;
+// Ignore sentences in card/skill descriptions. Only an isolated status cell blocks a selectable radio.
+for(const row of mapTroopList(table.rows||[])){
+if(row.closest('table')!==table)continue;
+for(const cell of mapTroopList(row.cells||[])){
+const label=cell.textContent.replace(/\s+/g,'').replace(/[：:]$/,'');
+if(/^(?:出兵中|出撃中|帰還中|行軍中|移動中)$/.test(label))return false;
+}
+}
+return true;
+}
 function readReadyRoster(html){
 const doc=documentFrom(html),availableIds=new Set();
 for(const input of doc.querySelectorAll('input[name="unit_assign_card_id"]')){
-const table=input.closest('.attackGeneralListTbl');
-if(!table || input.type!=='radio' || !/^\d+$/.test(input.value) || input.matches(':disabled'))continue;
-if(/出兵中|出撃中|帰還中|行軍中|移動中/.test(table.textContent))continue;
+if(!officialUnitSelectable(input))continue;
 availableIds.add(input.value);
 }
 return {html,availableIds};
 }
 function getRosterSnapshot(){
 if(rosterRead)return rosterRead;
-rosterRead=Promise.resolve($.ajax({url:'/facility/castle_send_troop.php',type:'GET',dataType:'html',timeout:15000})).then(readReadyRoster).finally(()=>{rosterRead=null;});
+rosterRead=Promise.resolve($.ajax({url:'/facility/castle_send_troop.php',type:'GET',cache:false,dataType:'html',timeout:15000})).then(readReadyRoster).finally(()=>{rosterRead=null;});
 return rosterRead;
 }
 function getReturnSnapshot(){
 if(returnRead)return returnRead;
-returnRead=Promise.resolve($.ajax({url:'/facility/unit_status.php?type=return',type:'GET',dataType:'html',timeout:15000})).then(async html=>{
+returnRead=Promise.resolve($.ajax({url:'/facility/unit_status.php?type=return',type:'GET',cache:false,dataType:'html',timeout:15000})).then(async html=>{
 const units=extractReturningUnits(documentFrom(html));
 const nameLookupStarted=performance.now();
 await enrichCommanderNames(units);
@@ -841,7 +857,7 @@ $('<div>').css({color:'#555','font-size':'10px'}).text('帰還 '+unit.arrival).a
 function refreshReturns() {
 if(returnRequest)return;
 returnRefresh.prop('disabled',true);
-returnRequest=$.ajax({url:'/facility/unit_status.php?type=return',type:'GET',dataType:'html'})
+returnRequest=$.ajax({url:'/facility/unit_status.php?type=return',type:'GET',cache:false,dataType:'html'})
 .done(html=>{
 if(!panel[0].isConnected)return;
 const doc=new DOMParser().parseFromString(html,'text/html');
@@ -1403,7 +1419,7 @@ const name=this.name;if(!name)return;
 const replacement=fresh.find('form :input[type="hidden"]').filter(function(){return this.name===name;}).first();
 if(replacement.length)$(this).val(replacement.val());
 });
-previewCache.clear();mergeTrackedTemplates();drawCards();renderTripRows();
+previewCache.clear();mergeTrackedTemplates();drawCards();renderTripRows();refreshReturns();
 }
 };
 applyScale();
@@ -1446,6 +1462,8 @@ $(document)
 );
 $.ajax({
 type: 'get',
+cache: false,
+dataType: 'html',
 url:
 '/facility/castle_send_troop.php'
 }).done(
