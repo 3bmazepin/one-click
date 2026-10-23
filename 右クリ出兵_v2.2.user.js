@@ -4,7 +4,7 @@
 // @description  右クリ出兵
 // @include      https://*.3gokushi.jp/*
 // @include      http://*.3gokushi.jp/*
-// @version      v2.2
+// @version      2.2.3
 // @require      https://code.jquery.com/jquery-3.1.1.js
 // @require      https://ajax.microsoft.com/ajax/jquery.templates/beta1/jquery.tmpl.js
 // @exclude      https://*.3gokushi.jp/world/select_server_mixi_new.php*
@@ -744,6 +744,24 @@ cell.empty().addClass('MapTroopPortrait')
 .append(img, $('<span>').text(level ? 'Lv' + level[1] : '').css({color:'#298fb9'})));
 });
 }
+function readOfficialSpeed(text) {
+const matches=Array.from(text.replace(/[,，]/g,'').matchAll(/(?:移動)?速度\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/g));
+return matches.length===1 ? Number(matches[0][1]) : null;
+}
+function compareOfficialSpeed(a,b) {
+if(a.speed===null && b.speed===null)return a.index-b.index;
+if(a.speed===null)return 1;
+if(b.speed===null)return -1;
+return b.speed-a.speed || a.index-b.index;
+}
+function sortedOfficialCards() {
+return source.toArray().map((element,index)=>{
+// Read the official displayed row. Do not double-apply deputy/weather effects.
+const row=$(element).find('tr').eq(1)[0],parts=[];
+if(row){const walker=document.createTreeWalker(row,NodeFilter.SHOW_TEXT);while(walker.nextNode())parts.push(walker.currentNode.textContent);}
+return {element,index,speed:readOfficialSpeed(parts.join(' '))};
+}).sort(compareOfficialSpeed).map(item=>item.element);
+}
 function drawCards() {
 $('.MapTroopRateTip').remove();
 skillStates.forEach(controls => controls.detach());
@@ -753,7 +771,7 @@ lvSelect.val() === 'hide';
 const moveType = moveSelect.val();
 const buttonName =
 MOVE_TYPES[moveType].name;
-source.each(function () {
+$(sortedOfficialCards()).each(function () {
 const table =
 $(this).clone();
 const mainRadio = table.find('input[name="unit_assign_card_id"]').first();
