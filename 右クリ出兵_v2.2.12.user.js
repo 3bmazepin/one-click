@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         ワンクリスマホ対応版
+// @name         ワンクリスマホ対応版2.2.12 軽量版
 // @namespace    MapTroopTool
-// @description  右クリ出兵
+// @description  右クリ・タップ出兵／勝率・速度順・行軍帰還カウントダウン（診断機能なし）
 // @include      https://*.3gokushi.jp/*
 // @include      http://*.3gokushi.jp/*
-// @version      2.2.3
+// @version      2.2.12
 // @require      https://code.jquery.com/jquery-3.1.1.js
 // @require      https://ajax.microsoft.com/ajax/jquery.templates/beta1/jquery.tmpl.js
 // @exclude      https://*.3gokushi.jp/world/select_server_mixi_new.php*
@@ -19,6 +19,32 @@
 // ==/UserScript==
 (function () {
 'use strict';
+function mapTroopList(value){
+const result=[];if(value==null)return result;
+if(typeof value[Symbol.iterator]==='function'){for(const item of value)result.push(item);}
+else if(Number.isSafeInteger(value.length) && value.length>=0){for(let i=0;i<value.length;i++)result.push(value[i]);}
+return result;
+}
+function mapTroopStringify(value){
+const seen=new WeakMap();
+function clone(input){
+if(input===null || typeof input!=='object')return input;
+if(seen.has(input))return seen.get(input);
+if(Array.isArray(input)){
+const copy=[];Object.defineProperty(copy,'toJSON',{value:undefined});seen.set(input,copy);
+for(let i=0;i<input.length;i++)copy.push(clone(input[i]));return copy;
+}
+const copy=Object.create(null);seen.set(input,copy);
+for(const key of Object.keys(input))if(key!=='toJSON')copy[key]=clone(input[key]);
+return copy;
+}
+return JSON.stringify(clone(value));
+}
+function mapTroopReadArray(value){
+let parsed=value;
+for(let i=0;i<3 && typeof parsed==='string';i++){try{parsed=JSON.parse(parsed);}catch(_){return [];}}
+return Array.isArray(parsed)?parsed:[];
+}
 const SERVER_NAME =
 location.hostname.match(/^(.*)\.3gokushi/)?.[1] || 'server';
 const KEY = {
@@ -208,6 +234,259 @@ Math.round(rect.top)
 }
 );
 }
+function readReturnTiming(text) {
+const arrival=text.match(/([0-9]{4}-[0-9]{2}-[0-9]{2})\s+([0-9]{2}:[0-5][0-9]:[0-5][0-9])/);
+const remaining=text.match(/あと\s*([0-9]+):([0-5][0-9]):([0-5][0-9])/);
+if(!arrival || !remaining)return null;
+return {arrival:arrival[1]+' '+arrival[2],seconds:Number(remaining[1])*3600+Number(remaining[2])*60+Number(remaining[3])};
+}
+function formatRemaining(seconds) {
+const n=Math.max(0,Math.floor(seconds));
+return [Math.floor(n/3600),Math.floor(n/60)%60,n%60].map(x=>String(x).padStart(2,'0')).join(':');
+}
+function returnRowLabel(row,label) {
+return mapTroopList(row.cells||[]).findIndex(cell=>cell.textContent.replace(/[\s\u00a0：:]/g,'')===label);
+}
+function extractReturningUnits(doc) {
+const result=[];
+for(const table of doc.querySelectorAll('table')) {
+const rows=mapTroopList(table.rows||[]).filter(row=>row.closest('table')===table);
+for(let i=0;i<rows.length;i++) {
+if(returnRowLabel(rows[i],'到着時刻')<0)continue;
+const timing=readReturnTiming(mapTroopList(rows[i].cells).map(cell=>cell.textContent).join(' '));
+if(!timing)continue;
+let start=i,end=rows.length;
+for(let j=i-1;j>=0;j--){
+if(returnRowLabel(rows[j],'到着時刻')>=0)break;
+if(returnRowLabel(rows[j],'出兵先')>=0){start=j;break;}
+}
+for(let j=i+1;j<rows.length;j++)if(returnRowLabel(rows[j],'到着時刻')>=0 || returnRowLabel(rows[j],'出兵先')>=0){end=j;break;}
+const block=rows.slice(start,end);
+let name='',destination='';
+for(const row of block){
+for(const label of ['武将','出兵先']){
+const cells=mapTroopList(row.cells),index=returnRowLabel(row,label);
+if(index<0)continue;
+const value=cells.slice(index+1).map(cell=>cell.textContent).join(' ').replace(/\s+/g,' ').trim();
+if(label==='武将')name=value;else destination=value;
+}
+}
+if(!name)continue;
+const cardIds=[];
+for(const row of block){
+for(const input of row.querySelectorAll('input[name]'))if(/^(?:card_id|unit_assign_card_id)(?:\[\])?$/.test(input.name) && /^\d+$/.test(input.value))cardIds.push(input.value);
+for(const node of row.querySelectorAll('[data-card-id]')){const value=node.getAttribute('data-card-id');if(/^\d+$/.test(value||''))cardIds.push(value);}
+for(const anchor of row.querySelectorAll('a[href]')){
+const raw=anchor.getAttribute('href')||'',windowId=raw.match(/cardWindow_(\d+)/);
+if(windowId)cardIds.push(windowId[1]);
+try{const params=new URL(raw,location.href).searchParams;for(const key of ['card_id','unit_assign_card_id']){const id=params.get(key);if(id && /^\d+$/.test(id))cardIds.push(id);}}catch(_){}
+}
+}
+const mainName=normalizedCommanderName(name);
+result.push({...timing,name,destination,mainName,cardIds:mapTroopList(new Set(cardIds))});
+}
+}
+return result;
+}
+const commanderNames=new Map();
+let commanderNameRead=null,commanderNameLookupAttempted=false;
+function referencedCommanderIds(original){
+let anchors=original.find('.illust a[href], th a[href]');
+if(!anchors.length)anchors=original.find('a[href]');
+const ids=new Set();
+anchors.each(function(){const match=(this.getAttribute('href')||'').match(/(?:inlineId=|#)?cardWindow_(\d+)/);if(match)ids.add(match[1]);});
+return mapTroopList(ids);
+}
+function bindCommanderNameToCard(original,id){
+const references=referencedCommanderIds(original);
+if(references.length!==1)return;
+const popupId=references[0],name=commanderNames.get(popupId);
+if(name){commanderNames.set(String(id),name);}
+}
+function collectCommanderNames(root){
+root.find('[id]').filter(function(){return /^cardWindow_\d+$/.test(this.id);}).each(function(){
+const popup=$(this),id=this.id.slice('cardWindow_'.length);
+let label=popup.find('.name').first();
+if(!label.length)label=popup.find('.card_name,.cardName,.busho_name,.bushoName,[data-card-name]').first();
+const name=normalizedCommanderName(label.attr('data-card-name')||label.text());
+if(name && !/^(?:武将|カード|画像|[0-9]+)$/.test(name)){commanderNames.set(id,name);}
+});
+root.find('.illustMini__div--name').each(function(){
+const label=$(this),ids=new Set();
+label.closest('.left').find('a[href]').each(function(){const m=(this.getAttribute('href')||'').match(/cardWindow_(\d+)/);if(m)ids.add(m[1]);});
+const name=normalizedCommanderName(label.text());
+if(ids.size===1 && name){const id=mapTroopList(ids)[0];commanderNames.set(id,name);}
+});
+root.find('input[name="unit_assign_card_id"]').each(function(){const table=$(this).closest('.attackGeneralListTbl');if(table.length)bindCommanderNameToCard(table,this.value);});
+}
+function applyCommanderNames(){
+cardTemplates.forEach((original,id)=>bindCommanderNameToCard(original,id));
+tripEngine.jobs.forEach(job=>{const name=commanderNames.get(job.id);if(name)job.nameHints=mapTroopList(new Set([...job.nameHints,name]));});
+}
+function safeDeckPageHref(raw,baseHref){
+try{
+const url=new URL(raw,baseHref),base=new URL(baseHref);
+if(url.origin!==base.origin || url.pathname!=='/card/deck.php')return null;
+const keys=mapTroopList(url.searchParams.keys());
+const allowed=['p','page','deck_page','label'];
+if(!keys.some(key=>['p','page','deck_page'].includes(key)))return null;
+if(keys.some(key=>!allowed.includes(key) || !/^\d+$/.test(url.searchParams.get(key))))return null;
+url.hash='';url.searchParams.sort();return url.pathname+url.search;
+}catch(_){return null;}
+}
+async function enrichCommanderNames(units){
+applyCommanderNames();
+function needsName(){return mapTroopList(tripEngine.jobs.values()).some(job=>job.state==='awaitReturn' && !units.some(unit=>(unit.cardIds||[]).includes(job.id) || job.nameHints.includes(normalizedCommanderName(unit.mainName))));}
+if(!needsName())return;
+if(commanderNameRead)return commanderNameRead;
+if(commanderNameLookupAttempted)return;
+commanderNameLookupAttempted=true;
+commanderNameRead=(async()=>{
+const queue=['/card/deck.php'],visited=new Set();
+while(queue.length && visited.size<4 && needsName()){
+const path=queue.shift();if(visited.has(path))continue;visited.add(path);
+const html=await $.ajax({url:path,type:'GET',dataType:'html',timeout:15000});
+const root=$('<div>').append($.parseHTML(html,document,false));collectCommanderNames(root);applyCommanderNames();
+root.find('a[href]').each(function(){
+const raw=this.getAttribute('href')||'',next=safeDeckPageHref(raw,location.origin+path);
+if(next && !visited.has(next) && !queue.includes(next))queue.push(next);
+});
+}
+})().catch(()=>{}).finally(()=>{commanderNameRead=null;});
+return commanderNameRead;
+}
+function normalizedCommanderName(text) {
+return String(text||'').split(/[（(]\s*副将/)[0].replace(/^\s*武将名\s*[:：]\s*/,'').replace(/\s+Lv\s*\d+\s*$/i,'').replace(/[\s\u3000]+/g,'').trim();
+}
+function readCommanderHints(original,id,officialPage) {
+const names=[];
+function add(value){const name=normalizedCommanderName(value);if(name && !/^(?:武将|カード|画像|Lv\d+|[0-9]+)$/.test(name))names.push(name);}
+bindCommanderNameToCard(original,id);
+add(commanderNames.get(String(id)));
+original.find('th a, .illust a, .illust img, img[alt], img[title], [data-card-name]').each(function(){
+add(this.getAttribute('alt'));add(this.getAttribute('title'));add(this.getAttribute('data-card-name'));
+if(this.tagName==='A')add(this.textContent);
+});
+original.find('input[name="unit_assign_card_id"]').filter(function(){return String(this.value)===String(id);}).each(function(){
+const nativeId=this.id;
+if(nativeId)original.find('label').filter(function(){return this.htmlFor===nativeId;}).each(function(){add(this.textContent);});
+});
+if(officialPage){
+const popup=officialPage.find('[id]').filter(function(){return this.id==='cardWindow_'+id;});
+popup.find('.name,.card_name,.cardName,.busho_name,.bushoName,[data-card-name]').each(function(){add(this.getAttribute('data-card-name')||this.textContent);});
+}
+return mapTroopList(new Set(names));
+}
+function createTripEngine(adapter) {
+const jobs=new Map(); let returnBusy=false,readyBusy=false;
+const retryDelays=[2000,5000,10000,30000];
+function persist(){adapter.save(mapTroopList(jobs.values()));}
+function changed(){persist();adapter.change();}
+function due(job){return Number.isFinite(job.nextCheck) && job.nextCheck<=adapter.now();}
+function postpone(job){job.attempts=(job.attempts||0)+1;job.nextCheck=job.attempts<=retryDelays.length ? adapter.now()+retryDelays[job.attempts-1] : null;}
+function add(info){
+const seconds=Number.isFinite(info.seconds) ? Math.max(0,info.seconds) : null;
+const job={id:String(info.id),nameHints:info.nameHints||[],state:seconds===null?'awaitReturn':'marching',deadline:seconds===null?null:info.sentAt+seconds*1000,nextCheck:seconds===null?null:0,attempts:0};
+jobs.set(job.id,job);changed();return job;
+}
+function restore(items){for(const job of items||[])if(job && /^\d+$/.test(String(job.id)) && ['marching','awaitReturn','returning','awaitReady'].includes(job.state)){
+job.id=String(job.id);delete job.issue;job.nameHints=mapTroopList(new Set(mapTroopReadArray(job.nameHints).filter(x=>typeof x==='string').map(normalizedCommanderName)));
+if(['marching','returning'].includes(job.state) && !Number.isFinite(job.deadline))continue;
+jobs.set(job.id,job);
+}}
+function chooseReturn(job,units){
+const exact=units.filter(unit=>(unit.cardIds||[]).includes(job.id));
+if(exact.length===1)return exact[0];
+if(exact.length>1)return null;
+const byName=units.filter(unit=>job.nameHints.map(normalizedCommanderName).includes(normalizedCommanderName(unit.mainName)));
+if(byName.length!==1)return null;
+const other=mapTroopList(jobs.values()).filter(other=>other.id!==job.id && other.nameHints.map(normalizedCommanderName).includes(normalizedCommanderName(byName[0].mainName)));
+return other.length ? null : byName[0];
+}
+async function tick(){
+const now=adapter.now();let advanced=false;
+for(const job of jobs.values()){
+if(job.state==='marching' && job.deadline<=now){job.state='awaitReturn';job.nextCheck=now;job.attempts=0;advanced=true;}
+if(job.state==='returning' && job.deadline<=now){job.state='awaitReady';job.nextCheck=now;job.attempts=0;advanced=true;}
+}
+if(advanced)changed();else adapter.change();
+const work=[];
+const returning=mapTroopList(jobs.values()).filter(job=>job.state==='awaitReturn' && due(job));
+if(returning.length && !returnBusy){returnBusy=true;work.push((async()=>{
+try {
+const units=await adapter.fetchReturns();const claimed=new Set();
+for(const job of returning){
+if(jobs.get(job.id)!==job || job.state!=='awaitReturn')continue;
+const match=chooseReturn(job,units);
+if(match && !claimed.has(match) && Number.isFinite(match.seconds) && match.seconds>=0){
+claimed.add(match);job.state='returning';job.deadline=adapter.now()+match.seconds*1000;job.nextCheck=null;job.attempts=0;
+}else {postpone(job);}
+}
+const unresolved=returning.filter(job=>jobs.get(job.id)===job && job.state==='awaitReturn');
+if(unresolved.length){
+try{const snapshot=await adapter.fetchRoster();const completed=[];for(const job of unresolved)if(snapshot.availableIds.has(job.id)){jobs.delete(job.id);completed.push(job.id);}if(completed.length)adapter.ready(snapshot,completed);}catch(_){}
+}
+}catch(_){returning.forEach(job=>{if(jobs.get(job.id)===job && job.state==='awaitReturn')postpone(job);});}
+finally{returnBusy=false;changed();}
+})());}
+const ready=mapTroopList(jobs.values()).filter(job=>job.state==='awaitReady' && due(job));
+if(ready.length && !readyBusy){readyBusy=true;work.push((async()=>{
+try{
+const snapshot=await adapter.fetchRoster();const completed=[];
+for(const job of ready){if(jobs.get(job.id)!==job || job.state!=='awaitReady')continue;
+if(snapshot.availableIds.has(job.id)){jobs.delete(job.id);completed.push(job.id);}else postpone(job);
+}
+if(completed.length)adapter.ready(snapshot,completed);
+}catch(_){ready.forEach(job=>{if(jobs.get(job.id)===job && job.state==='awaitReady')postpone(job);});}
+finally{readyBusy=false;changed();}
+})());}
+await Promise.all(work);
+}
+function refresh(){for(const job of jobs.values())if(job.state==='awaitReturn' || job.state==='awaitReady'){job.nextCheck=adapter.now();job.attempts=0;}return tick();}
+return {jobs,add,restore,tick,refresh};
+}
+const tripKey=SERVER_NAME+'_MapTroop_trips_v1';
+const cardTemplates=new Map(),pendingSends=new Set();
+let trackerContext=null,rosterRead=null,returnRead=null;
+function durationSeconds(text){const m=String(text||'').match(/^([0-9]+):([0-5][0-9]):([0-5][0-9])$/);return m?Number(m[1])*3600+Number(m[2])*60+Number(m[3]):null;}
+function documentFrom(html){return new DOMParser().parseFromString(html,'text/html');}
+function readReadyRoster(html){
+const doc=documentFrom(html),availableIds=new Set();
+for(const input of doc.querySelectorAll('input[name="unit_assign_card_id"]')){
+const table=input.closest('.attackGeneralListTbl');
+if(!table || input.type!=='radio' || !/^\d+$/.test(input.value) || input.matches(':disabled'))continue;
+if(/出兵中|出撃中|帰還中|行軍中|移動中/.test(table.textContent))continue;
+availableIds.add(input.value);
+}
+return {html,availableIds};
+}
+function getRosterSnapshot(){
+if(rosterRead)return rosterRead;
+rosterRead=Promise.resolve($.ajax({url:'/facility/castle_send_troop.php',type:'GET',dataType:'html',timeout:15000})).then(readReadyRoster).finally(()=>{rosterRead=null;});
+return rosterRead;
+}
+function getReturnSnapshot(){
+if(returnRead)return returnRead;
+returnRead=Promise.resolve($.ajax({url:'/facility/unit_status.php?type=return',type:'GET',dataType:'html',timeout:15000})).then(async html=>{
+const units=extractReturningUnits(documentFrom(html));
+const nameLookupStarted=performance.now();
+await enrichCommanderNames(units);
+const lookupSeconds=Math.floor((performance.now()-nameLookupStarted)/1000);
+units.forEach(unit=>{unit.seconds=Math.max(0,unit.seconds-lookupSeconds);});
+if(trackerContext && trackerContext.panel[0].isConnected)trackerContext.returns(units);
+return units;
+}).finally(()=>{returnRead=null;});
+return returnRead;
+}
+const tripEngine=createTripEngine({
+now:()=>Date.now(),
+save:items=>{try{save(tripKey,mapTroopStringify(items));}catch(_){}},
+change:()=>{if(trackerContext && trackerContext.panel[0].isConnected)trackerContext.render();},
+fetchReturns:getReturnSnapshot,fetchRoster:getRosterSnapshot,
+ready:(snapshot,ids)=>{if(trackerContext && trackerContext.panel[0].isConnected)trackerContext.ready(snapshot,ids);}
+});
+try{tripEngine.restore(mapTroopReadArray(load(tripKey,'[]')));}catch(_){}
+setInterval(()=>{tripEngine.tick().catch(()=>{});},1000);
 function createPanel(data, x, y, tile) {
 $('#wrapTroopArea').remove();
 $(document).off('.MapTroopDrag');
@@ -283,7 +562,7 @@ panel.append($('<style>').text(`
 #wrapTroopArea .attackGeneralListTbl td p {margin:0!important;}
 #wrapTroopArea .attackGeneralListTbl td br {line-height:1;}
 #wrapTroopArea .MapTroopStatus {text-align:left!important; white-space:nowrap; font-size:11px; font-variant-numeric:tabular-nums;}
-#wrapTroopArea .MapTroopStatus div {margin:0!important; padding:0!important; line-height:1.3!important;}
+#wrapTroopArea .MapTroopStatus div:not(.MapTroopMarchTime) {margin:0!important; padding:0!important; line-height:1.3!important;}
 #wrapTroopArea .MapTroopPortrait {width:90px!important; white-space:nowrap; font-size:10px; text-align:left!important;}
 #wrapTroopArea .MapTroopSkills {text-align:left; font-size:11px; line-height:1.2; margin-top:2px;}
 #wrapTroopArea .MapTroopSkills label {display:inline-block; margin-right:3px;}
@@ -300,6 +579,7 @@ panel.append($('<style>').text(`
 #wrapTroopArea .MapTroopRateSlot {display:block!important;min-height:14px;line-height:14px;text-align:center!important;margin:2px 0;overflow:hidden;}
 #wrapTroopArea .MapTroopRateSlot .MapTroopRate {font-size:11px;line-height:14px;white-space:nowrap;}
 #wrapTroopArea .MapTroopSkillSlot {display:block!important;margin:2px 0 0!important;}
+                #wrapTroopArea .MapTroopMarchTime {display:block;font-size:11px;line-height:1.1!important;margin:1px 0 0!important;padding:0!important;white-space:nowrap;color:#444;font-variant-numeric:tabular-nums;}
 @media (max-width:600px), (pointer:coarse) {
 #wrapTroopArea {width:calc(100vw - 16px)!important; max-width:calc(100vw - 16px)!important; box-sizing:border-box; padding:2px!important;}
 #wrapTroopArea .attackGeneralListTbl td:first-child {width:90px!important;max-width:90px!important;}
@@ -307,7 +587,7 @@ panel.append($('<style>').text(`
 #wrapTroopArea .attackGeneralListTbl col:nth-child(2) {width:64px!important;}
 #wrapTroopArea .MapTroopPortrait {width:64px!important;}
 #wrapTroopArea .MapTroopPortrait > div {flex-direction:column;gap:0!important;}
-#wrapTroopArea .MapTroopStatus > div {display:flex!important;flex-wrap:wrap;gap:0 6px;white-space:normal;}
+#wrapTroopArea .MapTroopStatus > div:not(.MapTroopMarchTime) {display:flex!important;flex-wrap:wrap;gap:0 6px;white-space:normal;}
 #wrapTroopArea .MapTroopActionHead {grid-template-columns:1fr;gap:4px;text-align:center;}
 #wrapTroopArea .MapTroopActionHead > button {width:100%;}
 #wrapTroopArea .MapTroopRateSlot {min-height:20px;line-height:20px;}
@@ -540,21 +820,70 @@ lvRow
 panel.append(
 settings
 );
+const returnBox=$('<details class="MapTroopReturns">').css({'font-size':'11px',margin:'1px 0',padding:'0 3px'});
+const returnSummary=$('<summary>').text('帰還 取得中…').css({cursor:'pointer','line-height':'20px'}).appendTo(returnBox);
+const returnBody=$('<div>').css({'max-height':'100px',overflow:'auto'}).appendTo(returnBox);
+const returnRefresh=$('<button type="button">').text('更新').css({'margin':'2px 0'}).appendTo(returnBody);
+const returnList=$('<div>').appendTo(returnBody);
+let returnUnits=[],returnSnapshot=0,returnRequest=null;
+function paintReturns() {
+const elapsed=Math.floor((performance.now()-returnSnapshot)/1000);
+if(!returnUnits.length)return;
+const minimum=Math.min(...returnUnits.map(unit=>Math.max(0,unit.seconds-elapsed)));
+returnSummary.text('帰還 '+returnUnits.length+'部隊 · 最短 '+formatRemaining(minimum));
+returnList.empty();
+returnUnits.forEach(unit=>{
+$('<div>').css({'line-height':'1.3',padding:'2px 0'}).text(unit.name+' · 残り '+formatRemaining(unit.seconds-elapsed))
+.attr('title',unit.destination+'／帰還時刻 '+unit.arrival).appendTo(returnList);
+$('<div>').css({color:'#555','font-size':'10px'}).text('帰還 '+unit.arrival).appendTo(returnList);
+});
+}
+function refreshReturns() {
+if(returnRequest)return;
+returnRefresh.prop('disabled',true);
+returnRequest=$.ajax({url:'/facility/unit_status.php?type=return',type:'GET',dataType:'html'})
+.done(html=>{
+if(!panel[0].isConnected)return;
+const doc=new DOMParser().parseFromString(html,'text/html');
+returnUnits=extractReturningUnits(doc);returnSnapshot=performance.now();
+returnList.empty();
+if(returnUnits.length)paintReturns();
+else {
+const text=doc.body.textContent;
+const empty=/帰還(?:中)?(?:の)?(?:部隊|武将)(?:は|が)?(?:いません|ありません|存在しません)/.test(text);
+returnSummary.text(empty ? '帰還 0部隊' : '帰還 情報を確認');
+$('<a>').attr({href:'/facility/unit_status.php?type=return',target:'_blank',rel:'noopener'}).text('公式の帰還一覧を開く').appendTo(returnList);
+}
+}).fail(()=>{if(panel[0].isConnected)returnSummary.text('帰還 取得エラー');})
+.always(()=>{returnRequest=null;returnRefresh.prop('disabled',false);});
+}
+returnRefresh.on('click',function(event){event.preventDefault();commanderNameLookupAttempted=false;refreshReturns();tripEngine.refresh().catch(()=>{});});
+panel.append(returnBox);
+const returnClock=setInterval(()=>{
+if(!panel[0].isConnected){clearInterval(returnClock);if(returnRequest)returnRequest.abort();return;}
+if(returnUnits.length)paintReturns();
+},1000);
+setTimeout(()=>{if(panel[0].isConnected)refreshReturns();},0);
 const cardArea =
 $('<div>');
 panel.append(
 cardArea
 );
-const source =
+let source =
 $(data).find(
 '.attackGeneralListTbl'
 );
+source.each(function(){const id=$(this).find('input[name="unit_assign_card_id"]').first().val();if(id)cardTemplates.set(String(id),$(this).clone());});
+function mergeTrackedTemplates(){
+const present=new Set(source.find('input[name="unit_assign_card_id"]').map(function(){return String(this.value);}).get());
+tripEngine.jobs.forEach((_job,id)=>{if(!present.has(id) && cardTemplates.has(id))source=source.add(cardTemplates.get(id).clone());});
+}
+mergeTrackedTemplates();
 const previewCache = new Map();
 const previewPage = $('<div>').append($.parseHTML(data, document, false));
+collectCommanderNames(previewPage);applyCommanderNames();
 const previewRadio = previewPage.find('input[name="unit_assign_card_id"]').first();
 const previewForm = previewRadio.closest('form').length ? previewRadio.closest('form') : previewPage.find('form').filter(function () { return $(this).find('input[name="unit_assign_card_id"]').length; }).first();
-let activePreview = null;
-let hoverToken = 0;
 function getPreviewFields(cardId) {
 if (!previewForm.length) return null;
 const fields = previewForm.find(':input[name]').filter(function () {
@@ -606,18 +935,14 @@ const m = attrs.match(pattern);
 if (m && Number(m[1]) <= 100) return m[1] + '%';
 }
 }
-const title = doc.title || '';
-const hasRateLabel = /勝\s*利\s*確\s*率/.test(visible + raw);
-const hasSendButton = !!doc.querySelector('input[name="btn_send"], button[name="btn_send"]');
-console.info('[右クリ出兵v2.2] 確率解析結果', {
-title, hasRateLabel, hasSendButton,
-htmlLength: html.length,
-imageCount: doc.images.length
-});
 return null;
 }
 const skillStates = new Map();
-const submittedCards = new Set();
+const submittedCards = {has:id=>tripEngine.jobs.has(String(id)) || pendingSends.has(String(id))};
+tripEngine.jobs.forEach(job=>{
+const original=cardTemplates.get(job.id);
+if(original)job.nameHints=mapTroopList(new Set([...job.nameHints,...readCommanderHints(original,job.id,previewPage)]));
+});
 const rateRow = settingRow('勝率');
 const alwaysRate = $('<input type="checkbox">').prop('checked', load(KEY.alwaysRate, '1') === '1');
 const threshold = $('<select>').append($('<option>').val('off').text('赤色化なし'));
@@ -659,23 +984,33 @@ return;
 }
 const wasChecked = target.checked;
 if (target.type === 'radio') {
-Array.from(controls).forEach(control => {
+mapTroopList(controls).forEach(control => {
 if (control.type === 'radio' && control.name === target.name) control.checked = false;
 });
 }
 target.checked = !wasChecked;
 }
+function readMarchTime(text) {
+const duration=text.match(/到着まで\s*[:：]\s*([0-9]+):([0-5][0-9]):([0-5][0-9])/);
+return duration ? duration.slice(1).join(':') : null;
+}
+function extractMarchTime(html) {
+const doc=new DOMParser().parseFromString(html,'text/html');
+doc.querySelectorAll('script,style').forEach(node=>node.remove());
+return readMarchTime(doc.body.textContent.replace(/\s+/g,' '));
+}
 function attachWinRateHover(table, cardId, button, controls) {
 const img = table.find('img').first();
+const marchText=$('<div class="MapTroopMarchTime">').css({'font-size':'11px','white-space':'nowrap','margin-top':'1px','line-height':'1.1'}).text('行軍 …').toggle(moveSelect.val()==='302').appendTo(table.find('.MapTroopStatus').first());
 const rateText = $('<span class="MapTroopRate">').appendTo(table.find('.MapTroopRateSlot').first());
 let tip = null, token = 0;
 function update(force) {
 const version = ++token;
 button.css({background:'',color:''});
 rateText.toggle(alwaysRate.prop('checked') && moveSelect.val() === '302');
-if (moveSelect.val() !== '302' || !table.closest('body').length) return;
+if (moveSelect.val() !== '302' || !table.closest('body').length || tripEngine.jobs.has(String(cardId))) return;
 const selected = controls.serializeArray();
-const key = JSON.stringify([x,y,cardId,selected]);
+const key = mapTroopStringify([x,y,cardId,selected]);
 function show(rate, message) {
 if (version !== token || !table.closest('body').length) return;
 const text = rate ? '勝率：' + rate : message;
@@ -683,17 +1018,23 @@ rateText.text(text); if (tip) tip.text(text);
 if (rate && threshold.val() !== 'off' && parseFloat(rate) <= Number(threshold.val()))
 button.css({background:'#c62828',color:'#fff'});
 }
-if (!force && previewCache.has(key)) { show(previewCache.get(key)); return; }
+if (!force && previewCache.has(key)) { const cached=previewCache.get(key); show(cached.rate); marchText.text(cached.march ? '行軍 '+cached.march : '行軍 —'); return; }
 show(null, '勝率：取得中…');
+marchText.text('行軍 …');
 const fields = getPreviewFields(cardId);
-if (!fields) { show(null, '勝率：フォーム取得不可'); return; }
+if (!fields) { show(null, '勝率：フォーム取得不可'); marchText.text('行軍 —'); return; }
 const names = new Set(controls.map(function () {return this.name;}).get());
 const payload = fields.filter(f => !names.has(f.name));
 names.forEach(name => { if (!selected.some(f => f.name === name)) payload.push({name, value:'0'}); });
 payload.push(...selected);
 const request = $.ajax({url:'/facility/castle_send_troop.php',type:'POST',data:$.param(payload),dataType:'html'});
-request.done(html => { const rate = extractWinRate(html); if (rate && version === token) previewCache.set(key,rate); show(rate,'勝率：解析不可'); })
-.fail(() => show(null,'勝率：通信エラー'));
+request.done(html => {
+const rate=extractWinRate(html),march=extractMarchTime(html);
+if(version!==token || !table.closest('body').length || tripEngine.jobs.has(String(cardId)))return;
+if(rate || march)previewCache.set(key,{rate,march});
+show(rate,'勝率：解析不可');
+marchText.text(march ? '行軍 '+march : '行軍 —');
+}).fail(() => {show(null,'勝率：通信エラー');if(version===token && !tripEngine.jobs.has(String(cardId)))marchText.text('行軍 —');});
 }
 img.css('cursor','help').on('mouseenter', function () {
 if (moveSelect.val() !== '302') return;
@@ -702,7 +1043,7 @@ const r=this.getBoundingClientRect(); tip.css({left:Math.max(0,Math.min(r.right+
 update(false);
 }).on('mouseleave', () => { if(tip) tip.remove(); tip=null; });
 controls.off('change').on('change', () => update(true));
-if(alwaysRate.prop('checked') || threshold.val() !== 'off') setTimeout(() => { if(table.closest('body').length) update(false); }, 0);
+if(moveSelect.val() === '302') setTimeout(() => { if(table.closest('body').length) update(false); }, 0);
 }
 function compactStatusLines(text) {
 const normalized = text.replace(/\s+/g, ' ').trim();
@@ -745,7 +1086,7 @@ cell.empty().addClass('MapTroopPortrait')
 });
 }
 function readOfficialSpeed(text) {
-const matches=Array.from(text.replace(/[,，]/g,'').matchAll(/(?:移動)?速度\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/g));
+const matches=mapTroopList(text.replace(/[,，]/g,'').matchAll(/(?:移動)?速度\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/g));
 return matches.length===1 ? Number(matches[0][1]) : null;
 }
 function compareOfficialSpeed(a,b) {
@@ -756,7 +1097,6 @@ return b.speed-a.speed || a.index-b.index;
 }
 function sortedOfficialCards() {
 return source.toArray().map((element,index)=>{
-// Read the official displayed row. Do not double-apply deputy/weather effects.
 const row=$(element).find('tr').eq(1)[0],parts=[];
 if(row){const walker=document.createTreeWalker(row,NodeFilter.SHOW_TEXT);while(walker.nextNode())parts.push(walker.currentNode.textContent);}
 return {element,index,speed:readOfficialSpeed(parts.join(' '))};
@@ -797,7 +1137,7 @@ return;
 }
 const id =
 radio.val();
-if (submittedCards.has(String(id))) return;
+table.attr('data-map-troop-id',String(id));
 const skills = nativeSkills($(this), id);
 const canSkill = moveType === '302' || moveType === '303';
 skills.prop('disabled', !canSkill);
@@ -845,6 +1185,13 @@ e.preventDefault();
 e.stopPropagation();
 if (submittedCards.has(String(id)) || $(this).prop('disabled')) return;
 const selectedSkillFields = canSkill ? skills.serializeArray() : [];
+const sentAt=Date.now();
+const cacheKey=mapTroopStringify([x,y,id,selectedSkillFields]);
+const marchEntry=previewCache.get(cacheKey);
+const seconds=durationSeconds(marchEntry && marchEntry.march);
+const nativeCard=cardTemplates.get(String(id));
+const nameHints=readCommanderHints(nativeCard || $(this).closest('table'),id,previewPage);
+pendingSends.add(String(id));
 const currentType =
 parseInt(
 moveSelect.val(),
@@ -888,8 +1235,9 @@ tile
 'fill',
 '#00FF00'
 );
-submittedCards.add(String(id));
-button.prop('disabled', true).text('送信済');
+pendingSends.delete(String(id));
+tripEngine.add({id,seconds,sentAt,nameHints:mapTroopList(new Set(nameHints))});
+button.prop('disabled', true).text('行軍中');
 skills.prop('disabled', true);
 table.find('.MapTroopSkills button').prop('disabled', true);
 table.css('opacity', '0.55');
@@ -898,6 +1246,7 @@ $('.MapTroopRateTip').remove();
 )
 .fail(
 function () {
+pendingSends.delete(String(id));
 button
 .prop(
 'disabled',
@@ -945,7 +1294,7 @@ skillBox.append(button);
 skills.each(function () {
 const control = this;
 if (control.tagName === 'SELECT') {
-Array.from(control.options).forEach(option => addSkillButton(control, option.value, option.textContent.trim()));
+mapTroopList(control.options).forEach(option => addSkillButton(control, option.value, option.textContent.trim()));
 } else addSkillButton(control, control.value, control.getAttribute('data-skill-label'));
 });
 refreshSkillButtons();
@@ -955,6 +1304,7 @@ attachWinRateHover(table, id, troopButton, skills);
 cardArea.append(
 table
 );
+renderTripRows();
 });
 if (
 !cardArea
@@ -1025,8 +1375,39 @@ $(document.body)
 .append(
 panel
 );
+function renderTripRows(){
+cardArea.children('table[data-map-troop-id]').each(function(){
+const table=$(this),id=String(table.attr('data-map-troop-id')),job=tripEngine.jobs.get(id);
+if(!job)return;
+const remaining=Number.isFinite(job.deadline)?Math.max(0,Math.ceil((job.deadline-Date.now())/1000)):0;
+const label=job.state==='marching'?'行軍 '+formatRemaining(remaining):job.state==='returning'?'帰還 '+formatRemaining(remaining):job.state==='awaitReady'?'帰還確認中':'帰還情報確認中';
+let status=table.find('.MapTroopMarchTime').first();
+if(!status.length)status=$('<div class="MapTroopMarchTime">').appendTo(table.find('.MapTroopStatus').first());
+status.show().text(label);
+table.find('.MapTroopActionHead button').prop('disabled',true).text(job.state==='marching'?'行軍中':job.state==='returning'?'帰還中':'確認中');
+table.find('.MapTroopSkills button, .MapTroopSkills :input').prop('disabled',true);
+table.css('opacity','0.6');
+});
+}
+trackerContext={panel,render:renderTripRows,
+returns:units=>{returnUnits=units;returnSnapshot=performance.now();if(units.length)paintReturns();},
+ready:(snapshot,ids)=>{
+const fresh=$('<div>').append($.parseHTML(snapshot.html,document,false));
+const freshSource=fresh.find('.attackGeneralListTbl');
+const freshIds=new Set();
+freshSource.each(function(){const id=$(this).find('input[name="unit_assign_card_id"]').first().val();if(id){freshIds.add(String(id));cardTemplates.set(String(id),$(this).clone());}});
+source=freshSource;
+ids.forEach(id=>{skillStates.delete(id);});
+previewForm.find(':input[type="hidden"]').each(function(){
+const name=this.name;if(!name)return;
+const replacement=fresh.find('form :input[type="hidden"]').filter(function(){return this.name===name;}).first();
+if(replacement.length)$(this).val(replacement.val());
+});
+previewCache.clear();mergeTrackedTemplates();drawCards();renderTripRows();
+}
+};
 applyScale();
-drawCards();
+drawCards();renderTripRows();tripEngine.refresh().catch(()=>{});
 }
 function contextFunction(e) {
 if (e.which !== 3) {
