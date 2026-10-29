@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         ワンクリスマホ対応版2.2.13 軽量版
+// @name         右クリスマホ対応版2.2.13 軽量版
 // @namespace    MapTroopTool
 // @description  右クリ・タップ出兵／勝率・速度順・行軍帰還カウントダウン（診断機能なし）
 // @include      https://*.3gokushi.jp/*
