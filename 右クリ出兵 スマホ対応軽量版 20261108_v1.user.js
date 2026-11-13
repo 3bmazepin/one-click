@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         右クリスマホ対応版2.2.13 軽量版
+// @name         右クリ出兵 スマホ対応軽量版 20261108_v1
 // @namespace    MapTroopTool
 // @description  右クリ・タップ出兵／勝率・速度順・行軍帰還カウントダウン（診断機能なし）
 // @include      https://*.3gokushi.jp/*
 // @include      http://*.3gokushi.jp/*
-// @version      2.2.13
+// @version      20261108.1
 // @require      https://code.jquery.com/jquery-3.1.1.js
 // @require      https://ajax.microsoft.com/ajax/jquery.templates/beta1/jquery.tmpl.js
 // @exclude      https://*.3gokushi.jp/world/select_server_mixi_new.php*
@@ -161,8 +161,16 @@ width: 'auto',
 row.append(label);
 return row;
 }
+function setPanelPosition(panel, left, top) {
+const zoom = Number(panel[0].style.zoom) || 1;
+panel.css({
+transform: 'none',
+left: left / zoom + 'px',
+top: top / zoom + 'px'
+});
+}
 function enableDrag(panel, handle) {
-let dragging = false;
+let pointerId = null;
 let dx = 0;
 let dy = 0;
 handle.css({
@@ -171,23 +179,20 @@ cursor: 'move',
 'touch-action': 'none'
 });
 handle.on('pointerdown', function (e) {
-if (e.button !== 0) return;
+if (e.button !== 0 || pointerId !== null) return;
 const rect =
 panel[0].getBoundingClientRect();
-dragging = true;
+pointerId = e.pointerId;
+handle[0].setPointerCapture(pointerId);
 dx = e.clientX - rect.left;
 dy = e.clientY - rect.top;
-panel.css({
-transform: 'none',
-left: rect.left + 'px',
-top: rect.top + 'px'
-});
+setPanelPosition(panel, rect.left, rect.top);
 e.preventDefault();
 });
 $(document).on(
 'pointermove.MapTroopDrag',
 function (e) {
-if (!dragging) return;
+if (e.pointerId !== pointerId) return;
 let left = e.clientX - dx;
 let top = e.clientY - dy;
 left = Math.max(
@@ -195,7 +200,7 @@ left = Math.max(
 Math.min(
 left,
 window.innerWidth -
-panel[0].offsetWidth
+panel[0].getBoundingClientRect().width
 )
 );
 top = Math.max(
@@ -205,17 +210,14 @@ top,
 window.innerHeight - 40
 )
 );
-panel.css({
-left: left + 'px',
-top: top + 'px'
-});
+setPanelPosition(panel, left, top);
 }
 );
 $(document).on(
 'pointerup.MapTroopDrag pointercancel.MapTroopDrag',
-function () {
-if (!dragging) return;
-dragging = false;
+function (e) {
+if (e.pointerId !== pointerId) return;
+pointerId = null;
 if (
 load(KEY.autoPos, '0') === '1'
 ) {
@@ -521,23 +523,14 @@ scale > 130
 scale = 100;
 }
 if (touchPanel) scale = Math.max(100, scale);
-const savedLeft = load(KEY.left);
-const savedTop = load(KEY.top);
+const savedLeft = parseFloat(load(KEY.left));
+const savedTop = parseFloat(load(KEY.top));
 const panel =
 $("<div id='wrapTroopArea'>").css({
 position: 'fixed',
-left:
-savedLeft !== null
-? savedLeft + 'px'
-: '50%',
-top:
-savedTop !== null
-? savedTop + 'px'
-: '100pt',
-transform:
-savedLeft !== null
-? 'none'
-: 'translateX(-50%)',
+left: '50%',
+top: 10000 / scale + 'pt',
+transform: 'translateX(-50%)',
 'z-index': 111111111,
 zoom: scale / 100,
 background: '#fff',
@@ -624,6 +617,9 @@ panel.append($('<style>').text(`
 #wrapTroopArea .attackGeneralListTbl td:first-child > span {display:block;margin:4px 0!important;font-size:14px;}
 }
 `));
+if (Number.isFinite(savedLeft) && Number.isFinite(savedTop)) {
+setPanelPosition(panel, savedLeft, savedTop);
+}
 panel.append(title);
 enableDrag(panel, title);
 const settings =
@@ -701,7 +697,7 @@ KEY.top
 );
 panel.css({
 left: '50%',
-top: '100pt',
+top: 10000 / scale + 'pt',
 transform:
 'translateX(-50%)'
 });
@@ -733,10 +729,14 @@ function applyScale() {
 scaleText.text(
 scale + '%'
 );
-panel.css(
-'zoom',
-scale / 100
-);
+const positioned = panel[0].style.transform === 'none';
+const rect = panel[0].getBoundingClientRect();
+panel.css('zoom', scale / 100);
+if (positioned) {
+setPanelPosition(panel, rect.left, rect.top);
+} else {
+panel.css('top', 10000 / scale + 'pt');
+}
 save(
 panelScaleKey,
 scale
